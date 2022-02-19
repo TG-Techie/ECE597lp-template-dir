@@ -1,410 +1,521 @@
+# The PROJECT_NAME can be changed arbitrarily (it does not depend on anything).
 PROJECT_NAME := ble_app_thingy_s132_pca20020
 
-export OUTPUT_FILENAME
-#MAKEFILE_NAME := $(CURDIR)/$(word $(words $(MAKEFILE_LIST)),$(MAKEFILE_LIST))
-MAKEFILE_NAME := $(MAKEFILE_LIST)
-MAKEFILE_DIR := $(dir $(MAKEFILE_NAME) )
+# The LINKER_SCRIPT is usually in the same directory as the Makefile.
+LINKER_SCRIPT := ble_app_thingy_gcc_nrf52.ld
 
-TEMPLATE_PATH = ../../../sdk_components/toolchain/gcc
+DBG_BUILD_DIR := ./_debug
+REL_BUILD_DIR := ./_release
+DEPS_DIR := ./_deps
+
+SDK_ROOT := ../../..
+PROJ_DIR := ..
+COMPONENTS_DIR := $(SDK_ROOT)/external/sdk13/components
+SOURCE_DIR := $(SDK_ROOT)/source
+LIBS_DIR := $(SDK_ROOT)/libs
+EXTERNAL_DIR := $(SDK_ROOT)/external/sdk13/external
+INCLUDE_DIR := $(SDK_ROOT)/include
+
+# JLINK_MON_DEBUG_DIR should point to the directory that contains the files
+# in JLINK_MON_DEBUG_FILES plus JLINK_MONITOR.h. If Monitor Mode Debugging is
+# not required then leave JLINK_MON_DEBUG_DIR empty.
+JLINK_MON_DEBUG_DIR := 
+
+# The offset of the application needs to be specified so the J-Link knows
+# the location of the DebugMon_Handler. For the S132 v4 this is 0x1F000.
+JLINK_MON_DEBUG_APP_FLASH_LOCATION := 0x1F000
+
+# If the JLINK_MON_DEBUG_DIR is empty then make sure it is evaluated correctly.
+JLINK_MON_DEBUG_DIR := $(strip $(JLINK_MON_DEBUG_DIR))
+
+# These are the required files as of version 6.12a of the J-Link driver.
+JLINK_MON_DEBUG_FILES := JLINK_MONITOR.c JLINK_MONITOR_ISR_SES.s
+
+# Init commands will be written to a file and then specified when starting GDB
+# instead of relying on .gdbinit (to avoid having to enable .gbdinit files).
+GDB_CMD_PATH := $(DBG_BUILD_DIR)/gdb.txt
+
+SD_HEX_PATH := $(COMPONENTS_DIR)/softdevice/s132/hex/s132_nrf52_4.0.2_softdevice.hex
+
+# Include the correct template Makefile depending on platform.
+TEMPLATE_PATH = $(COMPONENTS_DIR)/toolchain/gcc
 ifeq ($(OS),Windows_NT)
-include $(TEMPLATE_PATH)/Makefile.windows
+	include $(TEMPLATE_PATH)/Makefile.windows
+# The Windows command shell 'start' function is used so the executable
+# is started in its own window.
+	TERMINAL := cmd /c start ""
+	TERMINAL_END := 
+	NRFJPROG := nrfjprog.exe
+	GDBSERVER := JLinkGDBServerCL.exe
+	RTT_CLIENT := JLinkRTTClient.exe
 else
-include $(TEMPLATE_PATH)/Makefile.posix
+	include $(TEMPLATE_PATH)/Makefile.posix
+	TERMINAL := gnome-terminal -e "
+	TERMINAL_END := "
+	NRFJPROG := nrfjprog
+	GDBSERVER := JLinkGDBServer
+	RTT_CLIENT := JLinkRTTClient
 endif
 
-MK := mkdir
-RM := rm -rf
-
-#echo suspend
-ifeq ("$(VERBOSE)","1")
-NO_ECHO :=
-else
-NO_ECHO := @
+# If multiple J-Links are attached to the computer then "SN=1234" can be used
+# to specify a serial number for GDB and flash targets. A random GDB port will
+# be generated so multiple targets can be debugged simultaneously.
+GDB_PORT := 2331
+ifdef SN
+	NRFJPROG_SN := --snr $(SN)
+	GDB_SERVER_SN := -select usb=$(SN)
+	GDB_PORT := $(shell awk 'BEGIN{srand();printf("%4.4s", 1000+9999*rand())}')
 endif
 
-# Toolchain commands
-CC              := '$(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-gcc'
-AS              := '$(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-as'
-AR              := '$(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-ar' -r
-LD              := '$(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-ld'
-NM              := '$(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-nm'
-OBJDUMP         := '$(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-objdump'
-OBJCOPY         := '$(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-objcopy'
-SIZE            := '$(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-size'
+# Toolchain commands (these rely on the inclusion of the template Makefile)
+CC := $(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-gcc
+AS := $(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-as
+AR := $(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-ar -r
+LD := $(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-ld
+NM := $(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-nm
+OBJDUMP := $(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-objdump
+OBJCOPY := $(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-objcopy
+SIZE := $(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-size
+GDB := $(GNU_INSTALL_ROOT)/bin/$(GNU_PREFIX)-gdb
 
-#function for removing duplicates in a list
-remduplicates = $(strip $(if $1,$(firstword $1) $(call remduplicates,$(filter-out $(firstword $1),$1))))
+SHAREDFLAGS += \
+	-DNRF52 \
+	-DNRF52832_XXAA \
+	-DSWI_DISABLE0 \
+	-DS132 \
+	-DSOFTDEVICE_PRESENT \
+	-DBLE_STACK_SUPPORT_REQD \
+	-DNRF_LOG_USES_RTT=1 \
+	-DBSP_DEFINES_ONLY \
+	-DARM_MATH_CM4 \
+	-DMPU9250 \
+	-DEMPL \
+	-DUSE_DMP \
+	-DEMPL_TARGET_NRF52
 
-LIBS += \
-$(abspath ../../../libs/liblibmplmpu_m4_hardfp/liblibmplmpu.a) \
-$(abspath ../../../sdk_components/toolchain/cmsis/dsp/GCC/libarm_cortexM4lf_math.a) \
-$(abspath ../../../sdk_components/nfc/t2t_lib/nfc_t2t_lib_gcc.a) \
+CFLAGS += \
+	-DNRF52832 \
+	-DNRF_SD_BLE_API_VERSION=4 \
+	-D__HEAP_SIZE \
+	-DBLE_DFU_APP_SUPPORT \
+	-DNRF_DFU_SETTINGS_VERSION=1 \
+	-DCONFIG_NFCT_PINS_AS_GPIOS \
+	-DAUDIO_EQ_DEF=3 \
+	-mcpu=cortex-m4 \
+	-mthumb \
+	--std=gnu99 \
+	-Wall \
+	-mfloat-abi=hard \
+	-mfpu=fpv4-sp-d16 \
+	-ffunction-sections \
+	-fdata-sections \
+	-fno-strict-aliasing \
+	-fno-builtin \
+	-fshort-enums \
+	-mabi=aapcs \
+	-DHAL_NFC_ENGINEERING_BC_FTPAN_WORKAROUND \
+	$(SHAREDFLAGS)
 
-#source common to all targets
-C_SOURCE_FILES += \
-$(abspath ../main.c) \
-$(abspath ../../../source/modules/m_ble.c) \
-$(abspath ../../../source/modules/m_ble_flash.c) \
-$(abspath ../../../source/util/advertiser_beacon_timeslot.c) \
-$(abspath ../../../source/util/twi_manager.c) \
-$(abspath ../../../source/util/support_func.c) \
-$(abspath ../../../source/modules/m_environment.c) \
-$(abspath ../../../source/modules/m_environment_flash.c) \
-$(abspath ../../../source/modules/m_sound.c) \
-$(abspath ../../../source/modules/m_motion.c) \
-$(abspath ../../../source/modules/m_motion_flash.c) \
-$(abspath ../../../source/modules/m_ui.c) \
-$(abspath ../../../source/modules/m_ui_flash.c) \
-$(abspath ../../../source/modules/m_batt_meas.c) \
-$(abspath ../../../source/drivers/drv_gas_sensor.c) \
-$(abspath ../../../source/drivers/drv_ccs811.c) \
-$(abspath ../../../source/drivers/drv_pressure.c) \
-$(abspath ../../../source/drivers/drv_lps22hb.c) \
-$(abspath ../../../source/drivers/drv_humidity.c) \
-$(abspath ../../../source/drivers/drv_hts221.c) \
-$(abspath ../../../source/drivers/drv_ext_light.c) \
-$(abspath ../../../source/drivers/drv_ext_gpio.c) \
-$(abspath ../../../source/drivers/drv_nfc.c) \
-$(abspath ../../../source/util/sx150x_led_drv_calc.c) \
-$(abspath ../../../source/drivers/drv_sx1509.c) \
-$(abspath ../../../source/drivers/drv_bh1745.c) \
-$(abspath ../../../source/drivers/drv_color.c) \
-$(abspath ../../../source/drivers/drv_speaker.c) \
-$(abspath ../../../source/drivers/drv_mpu9250.c) \
-$(abspath ../../../source/drivers/drv_motion.c) \
-$(abspath ../../../source/drivers/drv_acc_lis3dh.c) \
-$(abspath ../../../source/drivers/drv_mic.c) \
-$(abspath ../../../libs/eMD6/core/driver/eMPL/inv_mpu.c) \
-$(abspath ../../../libs/eMD6/core/driver/eMPL/inv_mpu_dmp_motion_driver.c) \
-$(abspath ../../../libs/eMD6/core/mllite/data_builder.c) \
-$(abspath ../../../libs/eMD6/core/mllite/hal_outputs.c) \
-$(abspath ../../../libs/eMD6/core/mllite/message_layer.c) \
-$(abspath ../../../libs/eMD6/core/mllite/ml_math_func.c) \
-$(abspath ../../../libs/eMD6/core/mllite/mlmath.c) \
-$(abspath ../../../libs/eMD6/core/mllite/mpl.c) \
-$(abspath ../../../libs/eMD6/core/mllite/results_holder.c) \
-$(abspath ../../../libs/eMD6/core/mllite/start_manager.c) \
-$(abspath ../../../libs/eMD6/core/mllite/storage_manager.c) \
-$(abspath ../../../libs/eMD6/core/eMPL-hal/eMPL_outputs.c) \
-$(abspath ../../../libs/eMD6/core/driver/nRF52/log_nrf52.c) \
-$(abspath ../../../libs/dvi_adpcm/dvi_adpcm.c) \
-$(abspath ../../../libs/sr3_audio/drv_audio_coder_adpcm.c) \
-$(abspath ../../../libs/sr3_audio/drv_audio_coder_bv32fp.c) \
-$(abspath ../../../libs/sr3_audio/drv_audio_dsp.c) \
-$(abspath ../../../libs/sr3_audio/drv_audio_pdm.c) \
-$(abspath ../../../sdk_components/ble/common/ble_advdata.c) \
-$(abspath ../../../sdk_components/ble/ble_advertising/ble_advertising.c) \
-$(abspath ../../../sdk_components/ble/common/ble_conn_params.c) \
-$(abspath ../../../sdk_components/ble/common/ble_srv_common.c) \
-$(abspath ../../../sdk_components/ble/common/ble_conn_state.c) \
-$(abspath ../../../source/ble_services/ble_tes.c) \
-$(abspath ../../../source/ble_services/ble_tcs.c) \
-$(abspath ../../../source/ble_services/ble_uis.c) \
-$(abspath ../../../source/ble_services/ble_tms.c) \
-$(abspath ../../../source/ble_services/ble_tss.c) \
-$(abspath ../../../sdk_components/drivers_nrf/common/nrf_drv_common.c) \
-$(abspath ../../../sdk_components/drivers_nrf/gpiote/nrf_drv_gpiote.c) \
-$(abspath ../../../sdk_components/drivers_nrf/twi_master/nrf_drv_twi.c) \
-$(abspath ../../../sdk_components/drivers_nrf/pwm/nrf_drv_pwm.c) \
-$(abspath ../../../sdk_components/drivers_nrf/pdm/nrf_drv_pdm.c) \
-$(abspath ../../../sdk_components/drivers_nrf/clock/nrf_drv_clock.c) \
-$(abspath ../../../sdk_components/drivers_nrf/saadc/nrf_drv_saadc.c) \
-$(abspath ../../../sdk_components/drivers_nrf/hal/nrf_saadc.c) \
-$(abspath ../../../sdk_components/drivers_nrf/rng/nrf_drv_rng.c) \
-$(abspath ../../../sdk_components/nfc/ndef/launchapp/nfc_launchapp_msg.c) \
-$(abspath ../../../sdk_components/nfc/ndef/launchapp/nfc_launchapp_rec.c) \
-$(abspath ../../../sdk_components/nfc/ndef/uri/nfc_uri_msg.c) \
-$(abspath ../../../sdk_components/nfc/ndef/uri/nfc_uri_rec.c) \
-$(abspath ../../../sdk_components/nfc/ndef/generic/message/nfc_ndef_msg.c) \
-$(abspath ../../../sdk_components/nfc/ndef/generic/record/nfc_ndef_record.c) \
-$(abspath ../../../sdk_components/nfc/ndef/text/nfc_text_rec.c) \
-$(abspath ../../../sdk_components/nfc/t2t_lib/hal_t2t/hal_nfc_t2t.c) \
-$(abspath ../../../sdk_components/libraries/button/app_button.c) \
-$(abspath ../../../sdk_components/libraries/util/app_error.c) \
-$(abspath ../../../sdk_components/libraries/scheduler/app_scheduler.c) \
-$(abspath ../../../sdk_components/libraries/timer/app_timer.c) \
-$(abspath ../../../sdk_components/libraries/util/nrf_assert.c) \
-$(abspath ../../../sdk_components/libraries/uart/retarget.c) \
-$(abspath ../../../sdk_components/libraries/led_softblink/led_softblink.c) \
-$(abspath ../../../sdk_components/libraries/low_power_pwm/low_power_pwm.c) \
-$(abspath ../../../sdk_components/libraries/fstorage/fstorage.c) \
-$(abspath ../../../sdk_components/libraries/fds/fds.c) \
-$(abspath ../../../sdk_components/libraries/util/app_util_platform.c) \
-$(abspath ../../../sdk_components/libraries/util/sdk_mapped_flags.c) \
-$(abspath ../../../sdk_components/libraries/queue/nrf_queue.c) \
-$(abspath ../../../external/segger_rtt/RTT_Syscalls_GCC.c) \
-$(abspath ../../../external/segger_rtt/SEGGER_RTT.c) \
-$(abspath ../../../external/segger_rtt/SEGGER_RTT_printf.c) \
-$(abspath ../../../external/sdk13_override/softdevice_handler_appsh.c) \
-$(abspath ../../../sdk_components/softdevice/common/softdevice_handler/softdevice_handler.c) \
-$(abspath ../../../sdk_components/toolchain/system_nrf52.c) \
-$(abspath ../../../sdk_components/libraries/log/src/nrf_log_frontend.c) \
-$(abspath ../../../sdk_components/libraries/log/src/nrf_log_backend_serial.c) \
-$(abspath ../../../source/util/nrf_dfu_flash_buttonless.c) \
-$(abspath ../../../sdk_components/ble/ble_services/ble_dfu/ble_dfu.c) \
-$(abspath ../../../sdk_components/ble/ble_services/ble_bas/ble_bas.c) \
-$(abspath ../../../sdk_components/libraries/bootloader/dfu/nrf_dfu_settings.c) \
-$(abspath ../../../sdk_components/libraries/crc32/crc32.c) \
-$(abspath ../../../sdk_components/libraries/strerror/nrf_strerror.c) \
-#assembly files common to all targets
-ASM_SOURCE_FILES  = $(abspath ../../../sdk_components/toolchain/gcc/gcc_startup_nrf52.S)
+ASMFLAGS += \
+	-x assembler-with-cpp \
+	$(SHAREDFLAGS)
 
-#includes common to all targets
-INC_PATHS += -I$(abspath ../config)
-INC_PATHS += -I$(abspath ../../../external/segger_rtt)
-INC_PATHS += -I$(abspath ../../../include/ble_services)
-INC_PATHS += -I$(abspath ../../../include/board)
-INC_PATHS += -I$(abspath ../../../include/drivers)
-INC_PATHS += -I$(abspath ../../../include/macros)
-INC_PATHS += -I$(abspath ../../../include/modules)
-INC_PATHS += -I$(abspath ../../../include/util)
-INC_PATHS += -I$(abspath ../../../libs/bv32fp-1.2)
-INC_PATHS += -I$(abspath ../../../libs/dvi_adpcm)
-INC_PATHS += -I$(abspath ../../../libs/eMD6/core/driver/eMPL)
-INC_PATHS += -I$(abspath ../../../libs/eMD6/core/driver/include)
-INC_PATHS += -I$(abspath ../../../libs/eMD6/core/driver/nRF52)
-INC_PATHS += -I$(abspath ../../../libs/eMD6/core/eMPL-hal)
-INC_PATHS += -I$(abspath ../../../libs/eMD6/core/mllite)
-INC_PATHS += -I$(abspath ../../../libs/eMD6/core/mpl)
-INC_PATHS += -I$(abspath ../../../libs/sr3_audio)
-INC_PATHS += -I$(abspath ../../../sdk_components/ble/ble_advertising)
-INC_PATHS += -I$(abspath ../../../sdk_components/ble/ble_services/ble_bas)
-INC_PATHS += -I$(abspath ../../../sdk_components/ble/ble_services/ble_dfu)
-INC_PATHS += -I$(abspath ../../../sdk_components/ble/common)
-INC_PATHS += -I$(abspath ../../../sdk_components/device)
-INC_PATHS += -I$(abspath ../../../sdk_components/drivers_nrf/clock)
-INC_PATHS += -I$(abspath ../../../sdk_components/drivers_nrf/common)
-INC_PATHS += -I$(abspath ../../../sdk_components/drivers_nrf/config)
-INC_PATHS += -I$(abspath ../../../sdk_components/drivers_nrf/delay)
-INC_PATHS += -I$(abspath ../../../sdk_components/drivers_nrf/gpiote)
-INC_PATHS += -I$(abspath ../../../sdk_components/drivers_nrf/hal)
-INC_PATHS += -I$(abspath ../../../sdk_components/drivers_nrf/pdm)
-INC_PATHS += -I$(abspath ../../../sdk_components/drivers_nrf/pstorage)
-INC_PATHS += -I$(abspath ../../../sdk_components/drivers_nrf/pwm)
-INC_PATHS += -I$(abspath ../../../sdk_components/drivers_nrf/rng)
-INC_PATHS += -I$(abspath ../../../sdk_components/drivers_nrf/saadc)
-INC_PATHS += -I$(abspath ../../../sdk_components/drivers_nrf/twi_master)
-INC_PATHS += -I$(abspath ../../../sdk_components/drivers_nrf/uart)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/bootloader/dfu)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/button)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/crc32)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/experimental_section_vars)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/experimental_section_vars)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/fds)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/fifo)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/fstorage)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/fstorage)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/led_softblink)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/log)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/log/src)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/low_power_pwm)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/scheduler)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/strerror)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/timer)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/uart)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/util)
-INC_PATHS += -I$(abspath ../../../sdk_components/libraries/queue)
-INC_PATHS += -I$(abspath ../../../sdk_components/nfc/ndef/generic/record)
-INC_PATHS += -I$(abspath ../../../sdk_components/nfc/ndef/generic/message)
-INC_PATHS += -I$(abspath ../../../sdk_components/nfc/ndef/launchapp)
-INC_PATHS += -I$(abspath ../../../sdk_components/nfc/ndef/uri)
-INC_PATHS += -I$(abspath ../../../sdk_components/nfc/ndef/text)
-INC_PATHS += -I$(abspath ../../../sdk_components/nfc/t2t_lib)
-INC_PATHS += -I$(abspath ../../../sdk_components/nfc/ndef/text)
-INC_PATHS += -I$(abspath ../../../sdk_components/softdevice/common/softdevice_handler)
-INC_PATHS += -I$(abspath ../../../sdk_components/softdevice/s132/headers)
-INC_PATHS += -I$(abspath ../../../sdk_components/softdevice/s132/headers/nrf52)
-INC_PATHS += -I$(abspath ../../../sdk_components/toolchain)
-INC_PATHS += -I$(abspath ../../../sdk_components/toolchain/cmsis/include)
-INC_PATHS += -I$(abspath ../../../sdk_components/toolchain/gcc)
-INC_PATHS += -I$(abspath ../../../tools/sound)
+LDFLAGS += \
+	-Xlinker \
+	-Map=$(OBJ_DIR)/$(PROJECT_NAME).map \
+	-mthumb \
+	-mabi=aapcs \
+	-L $(TEMPLATE_PATH) \
+	-T$(LINKER_SCRIPT) \
+	-mcpu=cortex-m4 \
+	-mfloat-abi=hard \
+	-mfpu=fpv4-sp-d16 \
+	-Wl,--gc-sections \
+	--specs=nano.specs
 
-OBJECT_DIRECTORY = _build
-LISTING_DIRECTORY = $(OBJECT_DIRECTORY)
-OUTPUT_BINARY_DIRECTORY = $(OBJECT_DIRECTORY)
+# Add standard libraries at the very end of the linker input, after all objects
+# that may need symbols provided by these libraries.
+LIB_FILES += \
+	$(LIBS_DIR)/liblibmplmpu_m4_hardfp/liblibmplmpu.a \
+	$(COMPONENTS_DIR)/toolchain/cmsis/dsp/GCC/libarm_cortexM4lf_math.a \
+	$(COMPONENTS_DIR)/nfc/t2t_lib/nfc_t2t_lib_gcc.a \
+	-lc \
+	-lnosys \
+	-lm
 
-# Sorting removes duplicates
-BUILD_DIRECTORIES := $(sort $(OBJECT_DIRECTORY) $(OUTPUT_BINARY_DIRECTORY) $(LISTING_DIRECTORY) )
+SRC_FILES += \
+	$(PROJ_DIR)/main.c \
+	$(SOURCE_DIR)/modules/m_ble.c \
+	$(SOURCE_DIR)/modules/m_ble_flash.c \
+	$(SOURCE_DIR)/util/advertiser_beacon_timeslot.c \
+	$(SOURCE_DIR)/util/twi_manager.c \
+	$(SOURCE_DIR)/util/support_func.c \
+	$(SOURCE_DIR)/modules/m_environment.c \
+	$(SOURCE_DIR)/modules/m_environment_flash.c \
+	$(SOURCE_DIR)/modules/m_sound.c \
+	$(SOURCE_DIR)/modules/m_motion.c \
+	$(SOURCE_DIR)/modules/m_motion_flash.c \
+	$(SOURCE_DIR)/modules/m_ui.c \
+	$(SOURCE_DIR)/modules/m_ui_flash.c \
+	$(SOURCE_DIR)/modules/m_batt_meas.c \
+	$(SOURCE_DIR)/drivers/drv_nfc.c \
+	$(SOURCE_DIR)/drivers/drv_gas_sensor.c \
+	$(SOURCE_DIR)/drivers/drv_ccs811.c \
+	$(SOURCE_DIR)/drivers/drv_pressure.c \
+	$(SOURCE_DIR)/drivers/drv_lps22hb.c \
+	$(SOURCE_DIR)/drivers/drv_humidity.c \
+	$(SOURCE_DIR)/drivers/drv_hts221.c \
+	$(SOURCE_DIR)/drivers/drv_ext_light.c \
+	$(SOURCE_DIR)/drivers/drv_ext_gpio.c \
+	$(SOURCE_DIR)/util/sx150x_led_drv_calc.c \
+	$(SOURCE_DIR)/drivers/drv_sx1509.c \
+	$(SOURCE_DIR)/drivers/drv_bh1745.c \
+	$(SOURCE_DIR)/drivers/drv_color.c \
+	$(SOURCE_DIR)/drivers/drv_speaker.c \
+	$(SOURCE_DIR)/drivers/drv_mpu9250.c \
+	$(SOURCE_DIR)/drivers/drv_motion.c \
+	$(SOURCE_DIR)/drivers/drv_acc_lis3dh.c \
+	$(SOURCE_DIR)/drivers/drv_mic.c \
+	$(LIBS_DIR)/eMD6/core/driver/eMPL/inv_mpu.c \
+	$(LIBS_DIR)/eMD6/core/driver/eMPL/inv_mpu_dmp_motion_driver.c \
+	$(LIBS_DIR)/eMD6/core/mllite/data_builder.c \
+	$(LIBS_DIR)/eMD6/core/mllite/hal_outputs.c \
+	$(LIBS_DIR)/eMD6/core/mllite/message_layer.c \
+	$(LIBS_DIR)/eMD6/core/mllite/ml_math_func.c \
+	$(LIBS_DIR)/eMD6/core/mllite/mlmath.c \
+	$(LIBS_DIR)/eMD6/core/mllite/mpl.c \
+	$(LIBS_DIR)/eMD6/core/mllite/results_holder.c \
+	$(LIBS_DIR)/eMD6/core/mllite/start_manager.c \
+	$(LIBS_DIR)/eMD6/core/mllite/storage_manager.c \
+	$(LIBS_DIR)/eMD6/core/eMPL-hal/eMPL_outputs.c \
+	$(LIBS_DIR)/eMD6/core/driver/nRF52/log_nrf52.c \
+	$(LIBS_DIR)/dvi_adpcm/dvi_adpcm.c \
+	$(LIBS_DIR)/sr3_audio/drv_audio_coder_adpcm.c \
+	$(LIBS_DIR)/sr3_audio/drv_audio_coder_bv32fp.c \
+	$(LIBS_DIR)/sr3_audio/drv_audio_dsp.c \
+	$(LIBS_DIR)/sr3_audio/drv_audio_pdm.c \
+	$(COMPONENTS_DIR)/ble/common/ble_advdata.c \
+	$(COMPONENTS_DIR)/ble/ble_advertising/ble_advertising.c \
+	$(COMPONENTS_DIR)/ble/common/ble_conn_params.c \
+	$(COMPONENTS_DIR)/ble/common/ble_srv_common.c \
+	$(COMPONENTS_DIR)/ble/common/ble_conn_state.c \
+	$(SOURCE_DIR)/ble_services/ble_tes.c \
+	$(SOURCE_DIR)/ble_services/ble_tcs.c \
+	$(SOURCE_DIR)/ble_services/ble_uis.c \
+	$(SOURCE_DIR)/ble_services/ble_tms.c \
+	$(SOURCE_DIR)/ble_services/ble_tss.c \
+	$(COMPONENTS_DIR)/drivers_nrf/common/nrf_drv_common.c \
+	$(COMPONENTS_DIR)/drivers_nrf/gpiote/nrf_drv_gpiote.c \
+	$(COMPONENTS_DIR)/drivers_nrf/twi_master/nrf_drv_twi.c \
+	$(COMPONENTS_DIR)/drivers_nrf/pwm/nrf_drv_pwm.c \
+	$(COMPONENTS_DIR)/drivers_nrf/pdm/nrf_drv_pdm.c \
+	$(COMPONENTS_DIR)/drivers_nrf/clock/nrf_drv_clock.c \
+	$(COMPONENTS_DIR)/drivers_nrf/saadc/nrf_drv_saadc.c \
+	$(COMPONENTS_DIR)/drivers_nrf/hal/nrf_saadc.c \
+	$(COMPONENTS_DIR)/drivers_nrf/rng/nrf_drv_rng.c \
+	$(COMPONENTS_DIR)/nfc/ndef/launchapp/nfc_launchapp_msg.c) \
+	$(COMPONENTS_DIR)/nfc/ndef/launchapp/nfc_launchapp_rec.c) \
+	$(COMPONENTS_DIR)/nfc/ndef/uri/nfc_uri_msg.c) \
+	$(COMPONENTS_DIR)/nfc/ndef/uri/nfc_uri_rec.c) \
+	$(COMPONENTS_DIR)/nfc/ndef/generic/message/nfc_ndef_msg.c) \
+	$(COMPONENTS_DIR)/nfc/ndef/generic/record/nfc_ndef_record.c) \
+	$(COMPONENTS_DIR)/nfc/ndef/text/nfc_text_rec.c) \
+	$(COMPONENTS_DIR)/nfc/t2t_lib/hal_t2t/hal_nfc_t2t.c) \
+	$(COMPONENTS_DIR)/libraries/button/app_button.c \
+	$(COMPONENTS_DIR)/libraries/util/app_error.c \
+	$(COMPONENTS_DIR)/libraries/scheduler/app_scheduler.c \
+	$(COMPONENTS_DIR)/libraries/timer/app_timer.c \
+	$(COMPONENTS_DIR)/libraries/util/nrf_assert.c \
+	$(COMPONENTS_DIR)/libraries/uart/retarget.c \
+	$(COMPONENTS_DIR)/libraries/led_softblink/led_softblink.c \
+	$(COMPONENTS_DIR)/libraries/low_power_pwm/low_power_pwm.c \
+	$(COMPONENTS_DIR)/libraries/fstorage/fstorage.c \
+	$(COMPONENTS_DIR)/libraries/fds/fds.c \
+	$(COMPONENTS_DIR)/libraries/util/app_util_platform.c \
+	$(COMPONENTS_DIR)/libraries/util/sdk_mapped_flags.c \
+	$(COMPONENTS_DIR)/libraries/queue/nrf_queue.c \
+	$(EXTERNAL_DIR)/segger_rtt/RTT_Syscalls_GCC.c \
+	$(EXTERNAL_DIR)/segger_rtt/SEGGER_RTT.c \
+	$(EXTERNAL_DIR)/segger_rtt/SEGGER_RTT_printf.c \
+	$(COMPONENTS_DIR)/softdevice/common/softdevice_handler/softdevice_handler.c \
+	$(COMPONENTS_DIR)/toolchain/system_nrf52.c \
+	$(COMPONENTS_DIR)/libraries/log/src/nrf_log_frontend.c \
+	$(COMPONENTS_DIR)/libraries/log/src/nrf_log_backend_serial.c \
+	$(SOURCE_DIR)/util/nrf_dfu_flash_buttonless.c \
+	$(COMPONENTS_DIR)/ble/ble_services/ble_dfu/ble_dfu.c \
+	$(COMPONENTS_DIR)/ble/ble_services/ble_bas/ble_bas.c \
+	$(COMPONENTS_DIR)/libraries/bootloader/dfu/nrf_dfu_settings.c \
+	$(COMPONENTS_DIR)/libraries/crc32/crc32.c \
+	$(COMPONENTS_DIR)/libraries/strerror/nrf_strerror.c \
+	$(SDK_ROOT)/external/sdk13_override/softdevice_handler_appsh.c \
+	$(COMPONENTS_DIR)/toolchain/gcc/gcc_startup_nrf52.S
 
-#flags common to all targets
-CFLAGS = -DNRF52
-CFLAGS += -DNRF52832
-CFLAGS += -DNRF52832_XXAA
-CFLAGS += -DBLE_STACK_SUPPORT_REQD
-CFLAGS += -D__HEAP_SIZE=0
-CFLAGS += -DS132
-CFLAGS += -DNRF_SD_BLE_API_VERSION=4
-CFLAGS += -DNRF52_PAN_12
-CFLAGS += -DNRF52_PAN_15
-CFLAGS += -DNRF52_PAN_20
-CFLAGS += -DNRF52_PAN_30
-CFLAGS += -DNRF52_PAN_31
-CFLAGS += -DNRF52_PAN_36
-CFLAGS += -DNRF52_PAN_51
-CFLAGS += -DNRF52_PAN_53
-CFLAGS += -DNRF52_PAN_54
-CFLAGS += -DNRF52_PAN_55
-CFLAGS += -DNRF52_PAN_58
-CFLAGS += -DNRF52_PAN_62
-CFLAGS += -DNRF52_PAN_63
-CFLAGS += -DNRF52_PAN_64
-CFLAGS += -DSOFTDEVICE_PRESENT
-CFLAGS += -DSWI_DISABLE0
-CFLAGS += -DBSP_DEFINES_ONLY
-CFLAGS += -DARM_MATH_CM4
-CFLAGS += -DMPU9250
-CFLAGS += -DEMPL
-CFLAGS += -DUSE_DMP
-CFLAGS += -DEMPL_TARGET_NRF52
-CFLAGS += -DNRF_LOG_USES_RTT
-CFLAGS += -DNRF_LOG_USES_RTT=1
-CFLAGS += -DBLE_DFU_APP_SUPPORT
-CFLAGS += -DNRF_DFU_SETTINGS_VERSION=1
-CFLAGS += -DAUDIO_EQ_DEF=3
-CFLAGS += -DHAL_NFC_ENGINEERING_BC_FTPAN_WORKAROUND
-#
-CFLAGS += -mcpu=cortex-m4
-CFLAGS += -mthumb -mabi=aapcs --std=gnu99
-CFLAGS += -Wall -Werror -O3 -g3
-CFLAGS += -mfloat-abi=hard -mfpu=fpv4-sp-d16
-# keep every function in separate section. This will allow linker to dump unused functions
-CFLAGS += -ffunction-sections -fdata-sections -fno-strict-aliasing
-CFLAGS += -fno-builtin --short-enums
-#CFLAGS += -NRF_LOG_ENABLED=1 # Use if RTT output is desired.
-# keep every function in separate section. This will allow linker to dump unused functions
+INC_DIRS += \
+	$(SDK_ROOT)/external/sdk13_override \
+	$(COMPONENTS_DIR)/device \
+	$(COMPONENTS_DIR)/toolchain/cmsis/include \
+	$(COMPONENTS_DIR)/toolchain/gcc \
+	$(COMPONENTS_DIR)/toolchain \
+	$(PROJ_DIR)/config \
+	$(COMPONENTS_DIR)/ble/ble_advertising \
+	$(COMPONENTS_DIR)/ble/common \
+	$(EXTERNAL_DIR)/segger_rtt \
+	$(COMPONENTS_DIR)/drivers_nrf/common \
+	$(COMPONENTS_DIR)/drivers_nrf/clock \
+	$(COMPONENTS_DIR)/drivers_nrf/saadc \
+	$(COMPONENTS_DIR)/drivers_nrf/config \
+	$(COMPONENTS_DIR)/drivers_nrf/delay \
+	$(COMPONENTS_DIR)/drivers_nrf/gpiote \
+	$(COMPONENTS_DIR)/drivers_nrf/hal \
+	$(COMPONENTS_DIR)/drivers_nrf/pstorage \
+	$(COMPONENTS_DIR)/drivers_nrf/uart \
+	$(COMPONENTS_DIR)/drivers_nrf/pdm \
+	$(COMPONENTS_DIR)/drivers_nrf/twi_master \
+	$(COMPONENTS_DIR)/libraries/button \
+	$(COMPONENTS_DIR)/libraries/fifo \
+	$(COMPONENTS_DIR)/libraries/timer \
+	$(COMPONENTS_DIR)/libraries/uart \
+	$(COMPONENTS_DIR)/libraries/util \
+	$(COMPONENTS_DIR)/libraries/log/src \
+	$(COMPONENTS_DIR)/libraries/log \
+	$(COMPONENTS_DIR)/libraries/fstorage \
+	$(COMPONENTS_DIR)/libraries/fds \
+	$(COMPONENTS_DIR)/libraries/bootloader/dfu \
+	$(COMPONENTS_DIR)/libraries/experimental_section_vars \
+	$(COMPONENTS_DIR)/libraries/crc32 \
+	$(COMPONENTS_DIR)/libraries/led_softblink \
+	$(COMPONENTS_DIR)/libraries/low_power_pwm \
+	$(COMPONENTS_DIR)/nfc/ndef/generic/record \
+	$(COMPONENTS_DIR)/nfc/ndef/generic/message \
+	$(COMPONENTS_DIR)/nfc/ndef/launchapp \
+	$(COMPONENTS_DIR)/nfc/ndef/uri \
+	$(COMPONENTS_DIR)/nfc/ndef/text \
+	$(COMPONENTS_DIR)/nfc/t2t_lib \
+	$(COMPONENTS_DIR)/nfc/ndef/text \
+	$(COMPONENTS_DIR)/softdevice/common/softdevice_handler \
+	$(COMPONENTS_DIR)/softdevice/s132/headers \
+	$(COMPONENTS_DIR)/softdevice/s132/headers/nrf52 \
+	$(COMPONENTS_DIR)/ble/ble_services/ble_dfu \
+	$(COMPONENTS_DIR)/ble/ble_services/ble_bas \
+	$(INCLUDE_DIR)/ble_services \
+	$(INCLUDE_DIR)/drivers \
+	$(INCLUDE_DIR)/board \
+	$(INCLUDE_DIR)/modules \
+	$(INCLUDE_DIR)/macros \
+	$(INCLUDE_DIR)/util \
+	$(COMPONENTS_DIR)/libraries/scheduler \
+	$(COMPONENTS_DIR)/libraries/fstorage \
+	$(COMPONENTS_DIR)/libraries/experimental_section_vars \
+	$(COMPONENTS_DIR)/drivers_nrf/pwm \
+	$(SDK_ROOT)/tools/sound \
+	$(LIBS_DIR)/eMD6/core/driver/include \
+	$(LIBS_DIR)/eMD6/core/driver/eMPL \
+	$(LIBS_DIR)/eMD6/core/mpl \
+	$(LIBS_DIR)/eMD6/core/mllite \
+	$(LIBS_DIR)/eMD6/core/eMPL-hal \
+	$(LIBS_DIR)/eMD6/core/driver/nRF52 \
+	$(LIBS_DIR)/sr3_audio \
+	$(LIBS_DIR)/dvi_adpcm \
+	$(LIBS_DIR)/bv32fp-1.2 \
+	$(COMPONENTS_DIR)/drivers_nrf/rng \
+	$(COMPONENTS_DIR)/libraries/queue \
+	$(COMPONENTS_DIR)/libraries/strerror
 
-LDFLAGS += -Xlinker -Map=$(LISTING_DIRECTORY)/$(OUTPUT_FILENAME).map
-LDFLAGS += -mthumb -mabi=aapcs -L $(TEMPLATE_PATH) -T$(LINKER_SCRIPT)
-LDFLAGS += -mcpu=cortex-m4
-LDFLAGS += -mfloat-abi=hard -mfpu=fpv4-sp-d16
-# let linker to dump unused sections
-LDFLAGS += -Wl,--gc-sections
-# use newlib in nano version
-LDFLAGS += --specs=nano.specs -lc -lnosys
+# The Monitor Mode debugging files will always be tracked by make if they are
+# used during debugging. They won't be passed to the linker for the release
+# version of the build.
+DBG_SRC_FILES :=
+ifneq "$(JLINK_MON_DEBUG_DIR)" ""
+	INC_DIRS += $(JLINK_MON_DEBUG_DIR)
+	DBG_SRC_FILES += $(addprefix $(JLINK_MON_DEBUG_DIR)/, $(JLINK_MON_DEBUG_FILES))
+else
+$(warning Define JLINK_MON_DEBUG_DIR to enable Monitor Mode Debugging.)
+endif
 
-# Assembler flags
-ASMFLAGS += -x assembler-with-cpp
-ASMFLAGS += -DNRF52
-ASMFLAGS += -DBLE_STACK_SUPPORT_REQD
-ASMFLAGS += -DNRF52_PAN_12
-ASMFLAGS += -DNRF52_PAN_15
-ASMFLAGS += -DNRF52_PAN_20
-ASMFLAGS += -DNRF52_PAN_30
-ASMFLAGS += -DNRF52_PAN_31
-ASMFLAGS += -DNRF52_PAN_36
-ASMFLAGS += -DNRF52_PAN_51
-ASMFLAGS += -DNRF52_PAN_53
-ASMFLAGS += -DNRF52_PAN_54
-ASMFLAGS += -DNRF52_PAN_55
-ASMFLAGS += -DNRF52_PAN_58
-ASMFLAGS += -DNRF52_PAN_62
-ASMFLAGS += -DNRF52_PAN_63
-ASMFLAGS += -DNRF52_PAN_64
-ASMFLAGS += -DS132
-ASMFLAGS += -DNRF_LOG_USES_RTT=1
-ASMFLAGS += -DSOFTDEVICE_PRESENT
-ASMFLAGS += -DSWI_DISABLE0
-ASMFLAGS += -DDEBUG
-ASMFLAGS += -DBSP_DEFINES_ONLY
-ASMFLAGS += -DARM_MATH_CM4
-ASMFLAGS += -DMPU9250
-ASMFLAGS += -DEMPL
-ASMFLAGS += -DUSE_DMP
-ASMFLAGS += -DEMPL_TARGET_NRF52
+ASSEMBLY_EXTS := s S
 
-#default target - first one defined
-default: nrf52832_xxaa_s132
+# Convert to absolute paths and sort to remove duplicates.
+SRC_FILES := $(sort $(foreach f,$(SRC_FILES),$(abspath $(f))))
+DBG_SRC_FILES := $(sort $(foreach f,$(DBG_SRC_FILES),$(abspath $(f))))
+INC_DIRS := $(sort $(foreach d,$(INC_DIRS),$(abspath $(d))))
 
-#building all targets
-all: clean
-	$(NO_ECHO)$(MAKE) -f $(MAKEFILE_NAME) -C $(MAKEFILE_DIR) -e cleanobj
-	$(NO_ECHO)$(MAKE) -f $(MAKEFILE_NAME) -C $(MAKEFILE_DIR) -e nrf52832_xxaa_s132
+# Split the file paths into file names and directories. And remove duplicates.
+SRC_DIRS := $(sort $(dir $(SRC_FILES)))
+SRC_FILE_NAMES := $(notdir $(SRC_FILES))
+DBG_SRC_DIRS := $(sort $(dir $(DBG_SRC_FILES)))
+DBG_SRC_FILE_NAMES := $(notdir $(DBG_SRC_FILES))
 
-#target for printing all targets
-help:
-	@echo following targets are available:
-	@echo 	nrf52832_xxaa_s132
-	@echo 	flash_softdevice
+# Convert each source file name into the form '$(OBJ_DIR)/$(SRC_FILE).o'.
+OBJ := $(patsubst %,%.o,$(basename $(SRC_FILE_NAMES)))
+DBG_OBJ := $(patsubst %,%.o,$(basename $(DBG_SRC_FILE_NAMES)))
+DBG_OBJ := $(addprefix $(DBG_BUILD_DIR)/,$(OBJ) $(DBG_OBJ))
+REL_OBJ := $(addprefix $(REL_BUILD_DIR)/,$(OBJ))
 
-C_SOURCE_FILE_NAMES = $(notdir $(C_SOURCE_FILES))
-C_PATHS = $(call remduplicates, $(dir $(C_SOURCE_FILES) ) )
-C_OBJECTS = $(addprefix $(OBJECT_DIRECTORY)/, $(C_SOURCE_FILE_NAMES:.c=.o) )
+.PHONY: default
+default: CFLAGS += -O0 -ggdb -DDEBUG
+default: OBJ_DIR := $(DBG_BUILD_DIR)
+default: $(DBG_BUILD_DIR)/$(PROJECT_NAME).hex
+	$(call echosize,$(DBG_BUILD_DIR)/$(PROJECT_NAME).out)
 
-ASM_SOURCE_FILE_NAMES = $(notdir $(ASM_SOURCE_FILES))
-ASM_PATHS = $(call remduplicates, $(dir $(ASM_SOURCE_FILES) ))
-ASM_OBJECTS = $(addprefix $(OBJECT_DIRECTORY)/, $(ASM_SOURCE_FILE_NAMES:.S=.o) )
+.PHONY: release
+release: CFLAGS += -O3 -g3
+release: OBJ_DIR := $(REL_BUILD_DIR)
+release: $(REL_BUILD_DIR)/$(PROJECT_NAME).bin $(REL_BUILD_DIR)/$(PROJECT_NAME).hex
+	$(call echosize,$(REL_BUILD_DIR)/$(PROJECT_NAME).out)
 
-vpath %.c $(C_PATHS)
-vpath %.S $(ASM_PATHS)
+.PHONY: all
+all: default release
 
-OBJECTS = $(C_OBJECTS) $(ASM_OBJECTS)
+DEPS := $(addprefix $(DEPS_DIR)/,$(OBJ:.o=.d))
+-include $(DEPS)
 
-# Special case for inv_mpu as this throws uninitialized warnings
-$(OBJECT_DIRECTORY)/inv_mpu.o : CFLAGS+=-Wno-maybe-uninitialized
+INCLUDES := $(patsubst %,-I%,$(INC_DIRS))
 
-nrf52832_xxaa_s132: OUTPUT_FILENAME := nrf52832_xxaa_s132
-nrf52832_xxaa_s132: LINKER_SCRIPT=ble_app_thingy_gcc_nrf52.ld
+# Look for all source files in SRC_DIRS.
+vpath % $(SRC_DIRS) $(DBG_SRC_DIRS)
 
-nrf52832_xxaa_s132: $(BUILD_DIRECTORIES) $(OBJECTS)
-	@echo Linking target: $(OUTPUT_FILENAME).out
-	$(NO_ECHO)$(CC) $(LDFLAGS) $(OBJECTS) $(LIBS) -lm -o $(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).out
-	$(NO_ECHO)$(MAKE) -f $(MAKEFILE_NAME) -C $(MAKEFILE_DIR) -e finalize
+define echosize
+	@echo ''
+	@'$(SIZE)' $1
+	@echo ''
+endef
 
-## Create build directories
-$(BUILD_DIRECTORIES):
-	echo $(MAKEFILE_NAME)
-	$(MK) $@
+define flash
+	@"$(NRFJPROG)" $(NRFJPROG_SN) --program $1 -f nrf52 --sectorerase --verify
+	@"$(NRFJPROG)" $(NRFJPROG_SN) --reset -f nrf52
+endef
 
-# Create objects from C SRC files
-$(OBJECT_DIRECTORY)/%.o: %.c
+$(DBG_BUILD_DIR)/%.o: %.c | $(DBG_BUILD_DIR)
 	@echo Compiling file: $(notdir $<)
-	$(NO_ECHO)$(CC) $(CFLAGS) $(INC_PATHS) -c -o $@ $<
+	@'$(CC)' $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-# Assemble files
-$(OBJECT_DIRECTORY)/%.o: %.S
-	@echo Assembly file: $(notdir $<)
-	$(NO_ECHO)$(CC) $(ASMFLAGS) $(INC_PATHS) -c -o $@ $<
-# Link
-$(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).out: $(BUILD_DIRECTORIES) $(OBJECTS)
-	@echo Linking target: $(OUTPUT_FILENAME).out
-	$(NO_ECHO)$(CC) $(LDFLAGS) $(OBJECTS) $(LIBS) -lm -o $(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).out
-## Create binary .bin file from the .out file
-$(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).bin: $(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).out
-	@echo Preparing: $(OUTPUT_FILENAME).bin
-	$(NO_ECHO)$(OBJCOPY) -O binary $(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).out $(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).bin
+$(DBG_BUILD_DIR)/$(PROJECT_NAME).hex: $(DBG_BUILD_DIR)/$(PROJECT_NAME).out
+	@echo Creating hex file: $(notdir $@)
+	@'$(OBJCOPY)' -O ihex $(DBG_BUILD_DIR)/$(PROJECT_NAME).out $@
 
-## Create binary .hex file from the .out file
-$(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).hex: $(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).out
-	@echo Preparing: $(OUTPUT_FILENAME).hex
-	$(NO_ECHO)$(OBJCOPY) -O ihex $(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).out $(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).hex
+$(DBG_BUILD_DIR)/$(PROJECT_NAME).bin: $(DBG_BUILD_DIR)/$(PROJECT_NAME).out
+	@echo Creating bin file: $(notdir $@)
+	@'$(OBJCOPY)' -O binary $(DBG_BUILD_DIR)/$(PROJECT_NAME).out $@
 
-finalize: genbin genhex echosize
+$(DBG_BUILD_DIR)/$(PROJECT_NAME).out: $(DBG_OBJ)
+	@echo Linking ELF file: $(notdir $@)
+	@'$(CC)' $(LDFLAGS) $(DBG_OBJ) $(LIB_FILES) -o $@
 
-genbin:
-	@echo Preparing: $(OUTPUT_FILENAME).bin
-	$(NO_ECHO)$(OBJCOPY) -O binary $(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).out $(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).bin
+$(REL_BUILD_DIR)/%.o: %.c | $(REL_BUILD_DIR)
+	@echo Compiling file: $(notdir $<)
+	@'$(CC)' $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-## Create binary .hex file from the .out file
-genhex:
-	@echo Preparing: $(OUTPUT_FILENAME).hex
-	$(NO_ECHO)$(OBJCOPY) -O ihex $(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).out $(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).hex
-echosize:
-	-@echo ''
-	$(NO_ECHO)$(SIZE) $(OUTPUT_BINARY_DIRECTORY)/$(OUTPUT_FILENAME).out
-	-@echo ''
+$(REL_BUILD_DIR)/$(PROJECT_NAME).hex: $(REL_BUILD_DIR)/$(PROJECT_NAME).out
+	@echo Creating hex file: $(notdir $@)
+	@'$(OBJCOPY)' -O ihex $(REL_BUILD_DIR)/$(PROJECT_NAME).out $@
 
+$(REL_BUILD_DIR)/$(PROJECT_NAME).bin: $(REL_BUILD_DIR)/$(PROJECT_NAME).out
+	@echo Creating bin file: $(notdir $@)
+	@'$(OBJCOPY)' -O binary $(REL_BUILD_DIR)/$(PROJECT_NAME).out $@
+
+$(REL_BUILD_DIR)/$(PROJECT_NAME).out: $(REL_OBJ)
+	@echo Linking ELF file: $(notdir $@)
+	@'$(CC)' $(LDFLAGS) $(REL_OBJ) $(LIB_FILES) -o $@
+
+$(DEPS_DIR)/%.d: %.c | $(DEPS_DIR)
+	@echo Adding dependency for file: $(notdir $<)
+	@printf "$(DBG_BUILD_DIR)/$(notdir $(<:.c=.o)) " >$@
+	@"$(CC)" $(CFLAGS) $(INCLUDES) -c $< -MM \
+		-MT $(REL_BUILD_DIR)/$(notdir $(<:.c=.o)) >> $@
+
+# The eval command is used to create a different version of these targets for
+# each extension in the ASSEMBLY_EXTS list.
+define assembly_targets
+$$(DBG_BUILD_DIR)/%.o: %.$1 | $$(DBG_BUILD_DIR)
+	@echo Compiling assembly file: $$(notdir $$<)
+	@'$$(CC)' $$(ASMFLAGS) $$(INCLUDES) -c -o $$@ $$<
+
+$$(REL_BUILD_DIR)/%.o: %.$1 | $$(REL_BUILD_DIR)
+	@echo Compiling assembly file: $$(notdir $$<)
+	@'$$(CC)' $$(ASMFLAGS) $$(INCLUDES) -c -o $$@ $$<
+
+$$(DEPS_DIR)/%.d: %.$1 | $$(DEPS_DIR)
+	@echo Adding dependency for file: $$(notdir $$<)
+	@printf "$$(DBG_BUILD_DIR)/$$(notdir $$(<:.$1=.o)) " >$$@
+	@"$$(CC)" $$(ASMFLAGS) $$(INCLUDES) -c $$< -MM \
+		-MT $$(REL_BUILD_DIR)/$$(notdir $$(<:.$1=.o)) >>$$@
+endef
+$(foreach EXT,$(ASSEMBLY_EXTS),$(eval $(call assembly_targets,$(EXT))))
+
+$(DEPS_DIR) $(DBG_BUILD_DIR) $(REL_BUILD_DIR):; @mkdir $@
+
+.PHONY: flash_sd
+flash_sd:
+	$(call flash,$(SD_HEX_PATH))
+
+.PHONY: flash_debug
+flash_debug: default
+	$(call flash,$(DBG_BUILD_DIR)/$(PROJECT_NAME).hex)
+
+.PHONY: flash_release
+flash_release: release
+	$(call flash,$(REL_BUILD_DIR)/$(PROJECT_NAME).hex)
+
+.PHONY: gdb_cmd_file
+gdb_cmd_file: default
+	@echo "target remote localhost:$(GDB_PORT)" > $(GDB_CMD_PATH)
+	@echo "mon speed 10000" >> $(GDB_CMD_PATH)
+	@echo "mon flash download=1" >> $(GDB_CMD_PATH)
+	@echo "load $(DBG_BUILD_DIR)/$(PROJECT_NAME).out" >> $(GDB_CMD_PATH)
+	@echo "break main" >> $(GDB_CMD_PATH)
+	@echo "mon reset 0" >> $(GDB_CMD_PATH)
+	@echo "c" >> $(GDB_CMD_PATH)
+
+.PHONY: gdb_mon_cmd_file
+gdb_mon_cmd_file: gdb_cmd_file
+	@echo "mon exec SetMonModeDebug=1" >> $(GDB_CMD_PATH)
+	@echo "mon exec SetMonModeVTableAddr=$(JLINK_MON_DEBUG_APP_FLASH_LOCATION)" >> $(GDB_CMD_PATH)
+
+.PHONY: gdb_cli
+gdb_cli:
+	@$(TERMINAL) '$(GDBSERVER)' $(GDB_SERVER_SN) -device nrf52832_XXAA \
+		-if swd -port $(GDB_PORT) $(TERMINAL_END)
+	@$(TERMINAL) '$(GDB)' $(DBG_BUILD_DIR)/$(PROJECT_NAME).out -x $(GDB_CMD_PATH) $(TERMINAL_END)
+
+.PHONY: rtt
+rtt:
+	@$(TERMINAL) '$(RTT_CLIENT)' $(TERMINAL_END)
+
+.PHONY: gdb
+gdb: gdb_cmd_file gdb_cli
+
+.PHONY: gdb_mon
+gdb_mon: gdb_mon_cmd_file gdb_cli
+
+.PHONY: gdb_rtt
+gdb_rtt: gdb rtt
+
+.PHONY: gdb_mon_rtt
+gdb_mon_rtt: gdb_mon rtt
+
+.PHONY: clean
 clean:
-	$(RM) $(BUILD_DIRECTORIES)
+	@rm -rf $(DBG_BUILD_DIR)
+	@rm -rf $(REL_BUILD_DIR)
+	@rm -rf $(DEPS_DIR)
 
-cleanobj:
-	$(RM) $(BUILD_DIRECTORIES)/*.o
-flash: nrf52832_xxaa_s132
-	@echo Flashing: $(OUTPUT_BINARY_DIRECTORY)/$<.hex
-	nrfjprog --program $(OUTPUT_BINARY_DIRECTORY)/$<.hex -f nrf52  --sectorerase
-	nrfjprog --reset -f nrf52
+.PHONY: help
+help:
+	@echo "The following targets are available:"
+	@echo "    (default)              - Compile with debug flags"
+	@echo "    release                - Compile with release flags"
+	@echo "    all                    - Compile debug and release targets"
+	@echo "    clean                  - Remove object and dependency directories"
+	@echo "    gdb [SN=1234]          - Perform debug compile and then launch gdb"
+	@echo "    gdb_rtt [SN=1234]      - Call gdb target and then open RTT Client"
+ifneq "$(JLINK_MON_DEBUG_DIR)" ""
+	@echo "    gdb_mon [SN=1234]      - Enable Monitor Mode Debugging"
+	@echo "    gdb_mon_rtt [SN=1234]  - Enable Mon Debugging and open RTT Client"
+endif
+	@echo "    flash_sd [SN=1234]     - Flash the SoftDevice"
+	@echo "    flash_debug [SN=1234]  - Flash the debug build"
+	@echo "    flash_release [SN=1234]- Flash the release build"
 
-## Flash softdevice
-flash_softdevice:
-	@echo Flashing: s132_nrf52_4.0.2_softdevice.hex
-	nrfjprog --program ../../../sdk_components/softdevice/s132/hex/s132_nrf52_4.0.2_softdevice.hex -f nrf52 --chiperase
-	nrfjprog --reset -f nrf52
+# This is a special target that tells make to delete a file if an error occurs
+# while the file is being generated.
+.DELETE_ON_ERROR:
