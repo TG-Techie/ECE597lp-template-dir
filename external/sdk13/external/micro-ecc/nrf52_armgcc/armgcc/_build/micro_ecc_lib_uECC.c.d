@@ -1,11 +1,12 @@
 _build/micro_ecc_lib_uECC.c.o: ../../micro-ecc/uECC.c \
  ../../micro-ecc/uECC.h \
- /home/ece697lp/gcc-arm-none-eabi-4_9-2015q3/lib/gcc/arm-none-eabi/4.9.3/include/stdint.h \
- /home/ece697lp/gcc-arm-none-eabi-4_9-2015q3/arm-none-eabi/include/stdint.h \
- /home/ece697lp/gcc-arm-none-eabi-4_9-2015q3/arm-none-eabi/include/machine/_default_types.h \
- /home/ece697lp/gcc-arm-none-eabi-4_9-2015q3/arm-none-eabi/include/sys/features.h \
- /home/ece697lp/gcc-arm-none-eabi-4_9-2015q3/arm-none-eabi/include/sys/_intsup.h \
- /home/ece697lp/gcc-arm-none-eabi-4_9-2015q3/arm-none-eabi/include/sys/_stdint.h \
+ /usr/local/Cellar/arm-none-eabi-gcc/9-2019-q4-major/gcc/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
+ /usr/local/Cellar/arm-none-eabi-gcc/9-2019-q4-major/gcc/arm-none-eabi/include/stdint.h \
+ /usr/local/Cellar/arm-none-eabi-gcc/9-2019-q4-major/gcc/arm-none-eabi/include/machine/_default_types.h \
+ /usr/local/Cellar/arm-none-eabi-gcc/9-2019-q4-major/gcc/arm-none-eabi/include/sys/features.h \
+ /usr/local/Cellar/arm-none-eabi-gcc/9-2019-q4-major/gcc/arm-none-eabi/include/_newlib_version.h \
+ /usr/local/Cellar/arm-none-eabi-gcc/9-2019-q4-major/gcc/arm-none-eabi/include/sys/_intsup.h \
+ /usr/local/Cellar/arm-none-eabi-gcc/9-2019-q4-major/gcc/arm-none-eabi/include/sys/_stdint.h \
  ../../micro-ecc/uECC_vli.h ../../micro-ecc/types.h \
  ../../micro-ecc/platform-specific.inc ../../micro-ecc/asm_arm.inc \
  ../../micro-ecc/asm_arm_mult_square_umaal.inc \
@@ -13,17 +14,19 @@ _build/micro_ecc_lib_uECC.c.o: ../../micro-ecc/uECC.c \
 
 ../../micro-ecc/uECC.h:
 
-/home/ece697lp/gcc-arm-none-eabi-4_9-2015q3/lib/gcc/arm-none-eabi/4.9.3/include/stdint.h:
+/usr/local/Cellar/arm-none-eabi-gcc/9-2019-q4-major/gcc/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h:
 
-/home/ece697lp/gcc-arm-none-eabi-4_9-2015q3/arm-none-eabi/include/stdint.h:
+/usr/local/Cellar/arm-none-eabi-gcc/9-2019-q4-major/gcc/arm-none-eabi/include/stdint.h:
 
-/home/ece697lp/gcc-arm-none-eabi-4_9-2015q3/arm-none-eabi/include/machine/_default_types.h:
+/usr/local/Cellar/arm-none-eabi-gcc/9-2019-q4-major/gcc/arm-none-eabi/include/machine/_default_types.h:
 
-/home/ece697lp/gcc-arm-none-eabi-4_9-2015q3/arm-none-eabi/include/sys/features.h:
+/usr/local/Cellar/arm-none-eabi-gcc/9-2019-q4-major/gcc/arm-none-eabi/include/sys/features.h:
 
-/home/ece697lp/gcc-arm-none-eabi-4_9-2015q3/arm-none-eabi/include/sys/_intsup.h:
+/usr/local/Cellar/arm-none-eabi-gcc/9-2019-q4-major/gcc/arm-none-eabi/include/_newlib_version.h:
 
-/home/ece697lp/gcc-arm-none-eabi-4_9-2015q3/arm-none-eabi/include/sys/_stdint.h:
+/usr/local/Cellar/arm-none-eabi-gcc/9-2019-q4-major/gcc/arm-none-eabi/include/sys/_intsup.h:
+
+/usr/local/Cellar/arm-none-eabi-gcc/9-2019-q4-major/gcc/arm-none-eabi/include/sys/_stdint.h:
 
 ../../micro-ecc/uECC_vli.h:
 
